@@ -415,6 +415,54 @@ const HUD_CSS = `
 }
 .purerip-copy:hover { background: #4f46e5; }
 .purerip-copy.copied { background: #059669; }
+.purerip-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px 12px;
+}
+.purerip-btn-group {
+  display: flex;
+  gap: 8px;
+}
+.purerip-btn-secondary {
+  background: #334155;
+  color: #cbd5e1;
+  border: none;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.purerip-btn-secondary:hover { background: #475569; color: #fff; }
+.purerip-canvas-toggle {
+  display: flex;
+  gap: 4px;
+  background: #1e293b;
+  padding: 3px;
+  border-radius: 6px;
+}
+.purerip-canvas-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.purerip-canvas-btn.active {
+  background: #334155;
+  color: #f8fafc;
+}
+/* ألوان تلوين الكود البرمجي */
+.tok-kw { color: #c678dd; font-weight: 600; }
+.tok-fn { color: #61afef; }
+.tok-type { color: #e5c07b; }
+.tok-str { color: #98c379; }
+.tok-tag { color: #e06c75; }
+.tok-attr { color: #d19a66; }
 `;
 
 function buildPreviewDoc(previewHtml: string): string {
@@ -435,6 +483,40 @@ export interface HudController {
   render(compiled: CompiledComponent): void;
   /** Close and remove the HUD. */
   close(): void;
+}
+
+function syntaxHighlightJsx(code: string): string {
+  // Build entity strings at runtime so the write layer never decodes them.
+  const AMP = String.fromCharCode(38); // "&"
+  const ampEntity = `${AMP}amp;`; // "&"
+  const ltEntity = `${AMP}lt;`; // "<"
+  const gtEntity = `${AMP}gt;`; // ">"
+
+  return code
+    .replace(/&/g, ampEntity)
+    .replace(/</g, ltEntity)
+    .replace(/>/g, gtEntity)
+    .replace(
+      /\b(import|export|default|function|interface|return|from)\b/g,
+      '<span class="tok-kw">$1</span>',
+    )
+    .replace(
+      /\b(ComponentProps|Component)\b/g,
+      '<span class="tok-fn">$1</span>',
+    )
+    .replace(
+      /\b(string|boolean|number|void)\b/g,
+      '<span class="tok-type">$1</span>',
+    )
+    .replace(
+      new RegExp(`(${ltEntity}\\/?[a-zA-Z0-9_-]+)`, "g"),
+      '<span class="tok-tag">$1</span>',
+    )
+    .replace(
+      /\b([a-zA-Z-]+)=/g,
+      '<span class="tok-attr">$1</span>=',
+    )
+    .replace(/(["'].*?["'])/g, '<span class="tok-str">$1</span>');
 }
 
 /**
@@ -496,10 +578,39 @@ export function createHud(host: Element): HudController {
   content.className = "purerip-content";
   panel.appendChild(content);
 
+  const actionsRow = document.createElement("div");
+  actionsRow.className = "purerip-actions";
+
+  // خيارات تبديل خلفية المعاينة
+  const canvasToggle = document.createElement("div");
+  canvasToggle.className = "purerip-canvas-toggle";
+  const lightBtn = document.createElement("button");
+  lightBtn.className = "purerip-canvas-btn active";
+  lightBtn.textContent = "Light";
+  const darkBtn = document.createElement("button");
+  darkBtn.className = "purerip-canvas-btn";
+  darkBtn.textContent = "Dark";
+  canvasToggle.appendChild(lightBtn);
+  canvasToggle.appendChild(darkBtn);
+
+  const btnGroup = document.createElement("div");
+  btnGroup.className = "purerip-btn-group";
+
+  const downloadBtn = document.createElement("button");
+  downloadBtn.className = "purerip-btn-secondary";
+  downloadBtn.textContent = "Download .tsx";
+
   const copyBtn = document.createElement("button");
   copyBtn.className = "purerip-copy";
+  copyBtn.style.margin = "0";
   copyBtn.textContent = "Copy";
-  panel.appendChild(copyBtn);
+
+  btnGroup.appendChild(downloadBtn);
+  btnGroup.appendChild(copyBtn);
+
+  actionsRow.appendChild(canvasToggle);
+  actionsRow.appendChild(btnGroup);
+  panel.appendChild(actionsRow);
 
   backdrop.appendChild(panel);
   shadow.appendChild(backdrop);
@@ -540,11 +651,11 @@ export function createHud(host: Element): HudController {
 
     tsxPre = document.createElement("pre");
     tsxPre.className = "purerip-pre";
-    tsxPre.textContent = compiled.tsx;
+    tsxPre.innerHTML = syntaxHighlightJsx(compiled.tsx);
 
     htmlPre = document.createElement("pre");
     htmlPre.className = "purerip-pre";
-    htmlPre.textContent = compiled.html;
+    htmlPre.innerHTML = syntaxHighlightJsx(compiled.html);
 
     content.appendChild(previewIframe);
     content.appendChild(tsxPre);
@@ -623,6 +734,31 @@ export function createHud(host: Element): HudController {
           copyBtn.textContent = "Copy";
         }, 1500);
       });
+  });
+
+  lightBtn.addEventListener("click", () => {
+    lightBtn.classList.add("active");
+    darkBtn.classList.remove("active");
+    if (previewIframe) previewIframe.style.background = "#ffffff";
+  });
+
+  darkBtn.addEventListener("click", () => {
+    darkBtn.classList.add("active");
+    lightBtn.classList.remove("active");
+    if (previewIframe) previewIframe.style.background = "#09090b";
+  });
+
+  downloadBtn.addEventListener("click", () => {
+    if (!current) return;
+    const blob = new Blob([current.tsx], {
+      type: "text/typescript;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "DecompiledComponent.tsx";
+    a.click();
+    URL.revokeObjectURL(url);
   });
 
   const controller: HudController = {

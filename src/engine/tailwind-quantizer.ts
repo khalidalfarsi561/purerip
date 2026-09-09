@@ -1093,6 +1093,23 @@ function snapZIndex(value: string): TailwindClass {
   return "";
 }
 
+/** Snap a grid-template-columns value to a Tailwind grid-cols-N utility (1–12). */
+function snapGridCols(val: string): TailwindClass | null {
+  const v = val.trim();
+  // Computed value like "repeat(3, minmax(0, 1fr))".
+  const repeatMatch = v.match(/^repeat\((\d+),/);
+  if (repeatMatch) {
+    const n = parseInt(repeatMatch[1], 10);
+    if (n >= 1 && n <= 12) return `grid-cols-${n}`;
+  }
+  // Browser-resolved equal pixel tracks, e.g. "200px 200px 200px".
+  const pxTracks = v.split(/\s+/).filter((t) => /^\d+(\.\d+)?px$/.test(t));
+  if (pxTracks.length >= 1 && pxTracks.length <= 12) {
+    return `grid-cols-${pxTracks.length}`;
+  }
+  return null;
+}
+
 // ---- Color property → prefix ------------------------------------------------
 
 const COLOR_PROPERTY_PREFIXES: Record<string, ColorPrefix> = {
@@ -1236,6 +1253,11 @@ export function quantizeDeclaration(
     const cls = DISPLAY_UTILITIES[val];
     if (cls) return { property: prop, value: val, className: cls, confidence: 'exact' };
     return skipped(prop, val, 'unmappable display');
+  }
+  if (prop === 'gridTemplateColumns') {
+    const cls = snapGridCols(val);
+    if (cls) return { property: prop, value: val, className: cls, confidence: 'snapped' };
+    return skipped(prop, val, 'unmappable grid-template-columns');
   }
   if (prop === 'position') {
     const cls = POSITION_UTILITIES[val];

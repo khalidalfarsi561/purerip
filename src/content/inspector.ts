@@ -18,6 +18,7 @@ let overlayHost: HTMLElement | null = null;
 let overlay: OverlayController | null = null;
 let hudHost: HTMLElement | null = null;
 let hud: HudController | null = null;
+let currentHoverEl: HTMLElement | null = null;
 let rafId = 0;
 
 function ensureOverlay(): void {
@@ -39,16 +40,22 @@ function tagLabel(el: HTMLElement): string {
   return cls ? `${tag}.${cls}` : tag;
 }
 
+function highlightElement(el: HTMLElement): void {
+  currentHoverEl = el;
+  const rect = el.getBoundingClientRect();
+  overlay?.showAt(rect.left, rect.top, rect.width, rect.height, tagLabel(el));
+}
+
 function updateOverlay(x: number, y: number): void {
   const el = document.elementFromPoint(x, y);
   if (!el || !(el instanceof HTMLElement)) {
     overlay?.hide();
+    currentHoverEl = null;
     return;
   }
   if (overlayHost && (el === overlayHost || overlayHost.contains(el))) return;
   if (hudHost && (el === hudHost || hudHost.contains(el))) return;
-  const rect = el.getBoundingClientRect();
-  overlay?.showAt(rect.left, rect.top, rect.width, rect.height, tagLabel(el));
+  highlightElement(el);
 }
 
 function onMouseMove(e: MouseEvent): void {
@@ -71,6 +78,24 @@ function onKeydown(e: KeyboardEvent): void {
       hudHost.remove();
       hudHost = null;
     }
+    return;
+  }
+
+  // التنقل الهيكلي للأعلى والأسفل أثناء تفعيل أداة الفحص
+  if (active && !pipelineRunning && currentHoverEl) {
+    if (e.key === "ArrowUp") {
+      const parent = currentHoverEl.parentElement;
+      if (parent && parent !== document.body && parent !== document.documentElement) {
+        e.preventDefault();
+        highlightElement(parent);
+      }
+    } else if (e.key === "ArrowDown") {
+      const firstChild = currentHoverEl.firstElementChild;
+      if (firstChild instanceof HTMLElement) {
+        e.preventDefault();
+        highlightElement(firstChild);
+      }
+    }
   }
 }
 
@@ -84,7 +109,10 @@ function onClick(e: MouseEvent): void {
 
   e.preventDefault();
   e.stopPropagation();
-  void runPipeline(target as HTMLElement);
+  const elToProcess = currentHoverEl && (currentHoverEl === target || currentHoverEl.contains(target))
+    ? currentHoverEl
+    : (target as HTMLElement);
+  void runPipeline(elToProcess);
 }
 
 async function runPipeline(el: HTMLElement): Promise<void> {
@@ -145,6 +173,7 @@ export function deactivatePicker(): void {
     overlayHost = null;
   }
   overlay = null;
+  currentHoverEl = null; // أضف هذا السطر هنا
 }
 
 // Register the background message handler exactly once per isolated world
