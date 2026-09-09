@@ -12,8 +12,13 @@ import type {
   NormalNode,
   TailwindClass,
 } from './types';
-import { quantizeDeclaration, type QuantizeContext } from './tailwind-quantizer';
-import { isVoidElement } from './dom-traversal';
+import {
+  parseColor,
+  quantizeDeclaration,
+  type QuantizeContext,
+} from './tailwind-quantizer';
+import { diffElementStyles } from './style-diff';
+import { isVoidElement, REMOVED_TAGS } from './dom-traversal';
 
 // ---- Attribute mapping ------------------------------------------------------
 
@@ -187,6 +192,61 @@ function dedupe(list: string[]): string[] {
     }
   }
   return out;
+}
+
+// ---- Directional class deduplication ----------------------------------------
+
+const SHORTHAND_COVERS: Record<string, string[]> = {
+  p: ['px', 'py', 'pt', 'pr', 'pb', 'pl'],
+  m: ['mx', 'my', 'mt', 'mr', 'mb', 'ml'],
+  px: ['pl', 'pr'],
+  py: ['pt', 'pb'],
+  mx: ['ml', 'mr'],
+  my: ['mt', 'mb'],
+  gap: ['gap-x', 'gap-y'],
+  inset: ['inset-x', 'inset-y', 'top', 'right', 'bottom', 'left'],
+  'inset-x': ['left', 'right'],
+  'inset-y': ['top', 'bottom'],
+};
+
+function directionalPrefix(cls: string): { prefix: string; value: string } | null {
+  const m = cls.match(/^([a-z][a-z-]*)-(.*)$/);
+  if (!m) return null;
+  return { prefix: m[1], value: m[2] };
+}
+
+/**
+ * Drop longhand direction utilities that a shorthand already covers, e.g.
+ * `py-5` removes `pt-5`/`pb-5`, `px-2` removes `pl-2`/`pr-2`, and `gap-5`
+ * removes `gap-x-5`/`gap-y-5`. Only redundant pairs with matching values are
+ * removed, so an explicit `pt-6` alongside `p-4` survives (it overrides).
+ */
+export function dedupeDirectionalClasses(classes: string[]): string[] {
+  const shorthands = new Map<string, string>();
+  for (const cls of classes) {
+    const parsed = directionalPrefix(cls);
+    if (parsed && SHORTHAND_COVERS[parsed.prefix]) {
+      shorthands.set(parsed.prefix, parsed.value);
+    }
+  }
+
+  return classes.filter((cls) => {
+    const parsed = directionalPrefix(cls);
+    if (!parsed) return true;
+    // Drop the class if it is a longhand covered by a present shorthand with a
+    // matching value (e.g. py-5 removes pt-5/pb-5, px-2 removes pl-2/pr-2).
+    for (const [shorthand, shorthandValue] of shorthands) {
+      const longhands = SHORTHAND_COVERS[shorthand];
+      if (
+        longhands &&
+        longhands.includes(parsed.prefix) &&
+        shorthandValue === parsed.value
+      ) {
+        return false;
+      }
+    }
+    return true;
+  });
 }
 
 function cloneNode(node: NormalNode): NormalNode {
@@ -435,22 +495,32 @@ function buildTsx(
   ].join('\n');
 }
 
-/**
- * Orchestrate the final compilation: quantize base styles, merge transition
- * and variant classes onto the root, extract text props, then produce the
- * React TSX source and the pure Tailwind HTML + preview HTML.
- */
-export function compile(
-  tree: NormalNode,
-  extraction: ExtractionResult,
-): CompiledComponent {
-  const rootEl = extraction.base.element;
-  const fontSizePx = parseFloat(getComputedStyle(rootEl).fontSize);
-  const context: QuantizeContext = { fontSizePx };
+function isDarkColor(rgb: [number, number, number]): boolean {
+  const [r, g, b] = rgb;
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return luminance < 60;
+}
 
+// ---- Recursive quantization ------------------------------------------------
+
+/**
+ * Quantize a single (cloned) tree node against its live DOM element. Strips the
+ * original author `class` so only clean, snapped Tailwind tokens remain, and
+ * writes any non-quantizable style-worthy properties to a `style` prop.
+ */
+function quantizeElementNode(
+  node: NormalNode,
+  liveEl: HTMLElement,
+  own: Record<string, string>,
+  isRoot: boolean,
+  extraction: ExtractionResult,
+): void {
+  const fontSizePx = parseFloat(getComputedStyle(liveEl).fontSize);
+  const context: QuantizeContext = { fontSizePx };
   const mapped: TailwindClass[] = [];
   const leftover: Record<string, string> = {};
-  for (const [prop, value] of Object.entries(extraction.base.own)) {
+
+  for (const [prop, value] of Object.entries(own)) {
     const q = quantizeDeclaration(prop, value, context);
     if (q.confidence !== 'skipped' && q.className) {
       mapped.push(q.className);
@@ -459,21 +529,109 @@ export function compile(
     }
   }
 
-  const variantClasses = extraction.variants.flatMap((v) => v.classes);
-  const transition = extraction.transition ?? '';
-  const allClasses = dedupe(
-    [...mapped, transition, ...variantClasses].filter((c) => c.length > 0),
-  );
+  // For the root, promote a resolved dark background even when the style diff
+  // classified it as inherited (the element visually carries its own
+  // background, so a standalone decompiled component must bake it in). This
+  // fixes the black-card bug where `var(--ds-background-100)` collapsed to a
+  // transparent/white render in the preview.
+  if (
+    isRoot &&
+    extraction.base.inherited.backgroundColor !== undefined &&
+    own.backgroundColor === undefined
+  ) {
+    const value = getComputedStyle(liveEl).getPropertyValue('background-color');
+    const parsed = parseColor(value);
+    if (parsed && parsed.alpha > 0 && isDarkColor(parsed.rgb)) {
+      const q = quantizeDeclaration('backgroundColor', value, context);
+      if (q.confidence !== 'skipped' && q.className) {
+        mapped.push(q.className);
+      }
+    }
+  }
 
-  const modified = cloneNode(tree);
-  modified.props.class = classNameFromNormalNode(modified, allClasses);
+  const classStr = dedupeDirectionalClasses(dedupe(mapped)).join(' ');
+  if (classStr) {
+    node.props.class = classStr;
+  } else {
+    delete node.props.class;
+  }
 
   if (Object.keys(leftover).length > 0) {
-    modified.props.style = objectToCss(leftover);
+    node.props.style = objectToCss(leftover);
   } else {
-    // All styles were quantized into Tailwind classes — drop the original
-    // inline style so the generated markup isn't redundant.
-    delete modified.props.style;
+    delete node.props.style;
+  }
+}
+
+/**
+ * Walk the cloned tree in parallel with the live DOM subtree, quantizing every
+ * element node against its live counterpart. The sanitized clone preserves the
+ * element ordering of the live subtree (minus removed tags), so the two sides
+ * stay aligned.
+ */
+function quantizeTree(
+  tree: NormalNode,
+  liveRoot: HTMLElement,
+  extraction: ExtractionResult,
+): void {
+  const walk = (node: NormalNode, liveEl: HTMLElement, isRoot: boolean): void => {
+    if (node.kind !== 'element') return;
+
+    const own = isRoot
+      ? { ...extraction.base.own }
+      : diffElementStyles(liveEl).own;
+
+    quantizeElementNode(node, liveEl, own, isRoot, extraction);
+
+    const liveElementChildren = Array.from(liveEl.children).filter(
+      (c): c is Element => !REMOVED_TAGS.has(c.tagName.toLowerCase()),
+    );
+    const treeElementChildren = node.children.filter((c) => c.kind === 'element');
+    const count = Math.min(liveElementChildren.length, treeElementChildren.length);
+    for (let i = 0; i < count; i++) {
+      walk(treeElementChildren[i], liveElementChildren[i] as HTMLElement, false);
+    }
+  };
+
+  walk(tree, liveRoot, true);
+}
+
+/**
+ * Orchestrate the final compilation: recursively quantize base styles for every
+ * element node, merge transition and variant classes onto the root, extract
+ * text props, then produce the React TSX source and the pure Tailwind HTML +
+ * preview HTML.
+ */
+export function compile(
+  tree: NormalNode,
+  extraction: ExtractionResult,
+): CompiledComponent {
+  const rootEl = extraction.base.element;
+  const modified = cloneNode(tree);
+
+  // Recursively quantize the whole subtree — child elements no longer leak raw
+  // author classes like `text-[var(--themed-fg)]`.
+  quantizeTree(modified, rootEl, extraction);
+
+  // Merge variant classes + transition onto the root, then dedupe shorthands.
+  const variantClasses = extraction.variants.flatMap((v) => v.classes);
+  const transition = extraction.transition ?? '';
+  const rootBaseClasses = (modified.props.class ?? '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const allClasses = dedupeDirectionalClasses(
+    dedupe(
+      [...rootBaseClasses, transition, ...variantClasses].filter(
+        (c) => c.length > 0,
+      ),
+    ),
+  );
+
+  if (allClasses.length > 0) {
+    modified.props.class = allClasses.join(' ');
+  } else {
+    delete modified.props.class;
   }
 
   const { jsx, props, propName, defaultText, interactive } =

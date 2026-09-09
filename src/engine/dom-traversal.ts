@@ -59,7 +59,7 @@ export function elementMatchesInteractiveRoles(el: Element): boolean {
 
 // ---- Sanitize & clone -------------------------------------------------------
 
-const REMOVED_TAGS = new Set([
+export const REMOVED_TAGS = new Set([
   'script',
   'style',
   'noscript',

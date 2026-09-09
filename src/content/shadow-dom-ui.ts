@@ -603,8 +603,12 @@ export function createHud(host: Element): HudController {
 
   copyBtn.addEventListener("click", () => {
     if (!current) return;
+    // Copy the source for the currently active tab: TSX for React, HTML for
+    // pure Tailwind, and TSX as the default for the Preview tab.
+    const copyText =
+      activeTab === "html" ? current.html : current.tsx;
     navigator.clipboard
-      .writeText(current.tsx)
+      .writeText(copyText)
       .then(() => {
         copyBtn.textContent = "Copied \u2713";
         copyBtn.classList.add("copied");

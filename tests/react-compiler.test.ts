@@ -5,6 +5,7 @@ import {
   sanitizeJsxText,
   extractTextAndProps,
   compile,
+  dedupeDirectionalClasses,
 } from "../src/engine/react-compiler";
 import type { ExtractionResult, NormalNode } from "../src/engine/types";
 
@@ -56,6 +57,35 @@ describe("sanitizeJsxText", () => {
     expect(sanitizeJsxText("Hello {world} <tag>")).toBe(
       `Hello ${AMP}#123;world${AMP}#125; ${AMP}lt;tag>`,
     );
+  });
+});
+
+describe("dedupeDirectionalClasses", () => {
+  it("drops longhands that a shorthand already covers", () => {
+    const classes = [
+      "py-5",
+      "px-2",
+      "pb-5",
+      "pl-2",
+      "pr-2",
+      "pt-5",
+      "gap-5",
+      "gap-x-5",
+    ];
+    expect(dedupeDirectionalClasses(classes)).toEqual([
+      "py-5",
+      "px-2",
+      "gap-5",
+    ]);
+  });
+
+  it("keeps a longhand that overrides a shorthand with a different value", () => {
+    expect(dedupeDirectionalClasses(["p-4", "pt-6"])).toEqual(["p-4", "pt-6"]);
+  });
+
+  it("keeps unrelated utilities", () => {
+    const classes = ["flex", "rounded-lg", "bg-blue-600"];
+    expect(dedupeDirectionalClasses(classes)).toEqual(classes);
   });
 });
 
@@ -190,7 +220,7 @@ describe("compile", () => {
     expect(compiled.previewHtml).toContain("Sign in");
   });
 
-  it("merges existing original classes with quantized ones", () => {
+  it("strips original author classes and emits only quantized tokens", () => {
     document.body.innerHTML =
       '<button id="btn" style="padding:8px;">Continue</button>';
     const btn = document.getElementById("btn") as HTMLElement;
@@ -223,6 +253,85 @@ describe("compile", () => {
 
     const compiled = compile(tree, extraction);
     expect(compiled.tsx).toContain("p-2");
-    expect(compiled.tsx).toContain("btn-primary");
+    // Original author classes are stripped — only clean Tailwind tokens remain.
+    expect(compiled.tsx).not.toContain("btn-primary");
+    expect(compiled.tsx).toContain('className="p-2"');
+  });
+
+  it("recursively quantizes child elements and strips their raw author classes", () => {
+    document.body.innerHTML = [
+      '<div id="card" style="padding:20px;background-color:rgb(24,24,27);gap:20px;display:flex;">',
+      '  <button class="btn" style="padding:16px;">Get Started</button>',
+      '  <span class="label" style="font-size:14px;">Hello</span>',
+      "</div>",
+    ].join("");
+    const card = document.getElementById("card") as HTMLElement;
+
+    const tree: NormalNode = {
+      kind: "element",
+      tag: "div",
+      props: {},
+      children: [
+        {
+          kind: "element",
+          tag: "button",
+          props: { class: "btn" },
+          children: [
+            {
+              kind: "text",
+              tag: "#text",
+              props: {},
+              children: [],
+              text: "Get Started",
+            },
+          ],
+        },
+        {
+          kind: "element",
+          tag: "span",
+          props: { class: "label" },
+          children: [
+            {
+              kind: "text",
+              tag: "#text",
+              props: {},
+              children: [],
+              text: "Hello",
+            },
+          ],
+        },
+      ],
+    };
+
+    const extraction: ExtractionResult = {
+      base: {
+        element: card,
+        own: {
+          padding: "20px",
+          backgroundColor: "rgb(24,24,27)",
+          gap: "20px",
+          display: "flex",
+        },
+        inherited: {},
+      },
+      variants: [],
+      transition: undefined,
+    };
+
+    const compiled = compile(tree, extraction);
+
+    // Root styles quantized, shorthands deduped.
+    expect(compiled.tsx).toContain("flex");
+    expect(compiled.tsx).toContain("gap-5");
+    expect(compiled.tsx).toContain("p-5");
+    expect(compiled.tsx).toContain("bg-zinc-900");
+
+    // Child button: original `btn` stripped, padding quantized to `p-4`.
+    expect(compiled.tsx).toContain('className="p-4"');
+    expect(compiled.tsx).not.toContain('className="btn"');
+
+    // Child span: original `label` stripped, font-size quantized to `text-sm`.
+    expect(compiled.tsx).toContain('className="text-sm"');
+    expect(compiled.tsx).not.toContain('className="label"');
   });
 });

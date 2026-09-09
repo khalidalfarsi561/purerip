@@ -38,9 +38,12 @@ describe("end-to-end pipeline", () => {
     expect(compiled.tsx).not.toContain('id="btn"');
     expect(compiled.tsx).not.toContain("style={{");
 
-    // Pure HTML output keeps the original class attribute and text.
+    // Pure HTML output emits only clean quantized classes — original author
+    // classes like `cta` are stripped entirely.
     expect(compiled.html).toContain("class=");
-    expect(compiled.html).toContain("cta");
+    expect(compiled.html).not.toContain("cta");
+    expect(compiled.html).toContain("text-zinc-50");
+    expect(compiled.html).toContain("bg-blue-600");
     expect(compiled.html).toContain("Get Started");
   });
 
