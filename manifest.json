@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "PureRip",
+  "version": "0.1.0",
+  "description": "Decompile any rendered UI element into clean React + Tailwind v3 code.",
+  "permissions": ["activeTab", "scripting", "storage", "clipboardWrite"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {},
+  "commands": {
+    "toggle-picker": {
+      "suggested_key": {
+        "default": "Alt+Shift+X"
+      },
+      "description": "Toggle the PureRip element picker"
+    }
+  }
+}

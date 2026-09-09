@@ -1,0 +1,28 @@
+# Auto-detect text files and normalize line endings to LF in the repo.
+* text=auto eol=lf
+
+# Explicitly mark these as text (never binary).
+*.ts text
+*.tsx text
+*.js text
+*.mjs text
+*.json text
+*.md text
+*.html text
+*.css text
+*.yml text
+*.yaml text
+*.svg text
+*.ico text
+
+# Binary files should never be auto-converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.zip binary
+
+# Lock files should not be normalized (they are intentionally deterministic).
+package-lock.json -text

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PureRip Dev Harness</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 32px; color: #1e293b; }
+      .target { padding: 16px 24px; background: #2563eb; color: #fff; border-radius: 8px; cursor: pointer; }
+      .target:hover { background: #1d4ed8; }
+      .target:active { background: #1e40af; }
+      .output { margin-top: 24px; padding: 16px; background: #f1f5f9; border-radius: 8px; font-family: monospace; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>PureRip Dev Harness</h1>
+    <p>Hover / click the element below, then run the engine from the console.</p>
+    <button id="target" class="target">Get Started</button>
+    <pre id="output" class="output">Engine not yet wired up.</pre>
+    <script type="module" src="/src/dev-harness.ts"></script>
+  </body>
+</html>
