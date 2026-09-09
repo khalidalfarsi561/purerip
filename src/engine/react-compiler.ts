@@ -134,7 +134,6 @@ function objectToCss(obj: Record<string, string>): string {
 
 const STYLE_WORTHY_PROPS = new Set([
   'transform',
-  'transformOrigin',
   'filter',
   'backdropFilter',
   'clipPath',
@@ -145,13 +144,32 @@ const STYLE_WORTHY_PROPS = new Set([
   'WebkitMaskImage',
   'textShadow',
   'perspective',
-  'perspectiveOrigin',
   'willChange',
   'flex',
   'gridTemplateColumns',
   'gridTemplateRows',
   'columnCount',
 ]);
+
+/** Computed origin props that browsers fill with pixel noise on every element. */
+const COMPUTED_ORIGIN_PROPS = new Set(['transformOrigin', 'perspectiveOrigin']);
+
+/** True when a transform string is the identity (or absent), i.e. no real transform. */
+function isIdentityTransform(value: string): boolean {
+  const v = value.trim().toLowerCase();
+  if (!v || v === 'none') return true;
+  const compact = v.replace(/\s+/g, '');
+  return compact === 'matrix(1,0,0,1,0,0)';
+}
+
+/**
+ * Matches Tailwind text *color* utilities (text-zinc-50, text-white,
+ * text-transparent, …) but NOT text-size/alignment utilities (text-sm,
+ * text-left, …). Used to strip a dark authored text token when we force a light
+ * one for contrast.
+ */
+const TEXT_COLOR_CLASS_RE =
+  /^text-(white|black|transparent|current|inherit|slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)(-\d{2,3})?$/;
 
 // ---- Text sanitization ------------------------------------------------------
 
@@ -216,21 +234,70 @@ function directionalPrefix(cls: string): { prefix: string; value: string } | nul
 }
 
 /**
+ * Actively synthesize directional shorthands from matching longhands so the
+ * emitted utility list is as compact as possible. Pairs must share the same
+ * value:
+ *   pt-X  pb-X          -> py-X
+ *   pl-X  pr-X          -> px-X
+ *   py-X  px-X          -> p-X
+ *   gap-x-X  gap-y-X    -> gap-X
+ */
+function synthesizeDirectionalClasses(classes: string[]): string[] {
+  let result = [...classes];
+
+  const combine = (
+    first: string,
+    second: string,
+    shorthand: string,
+  ): void => {
+    const byValue = new Map<
+      string,
+      { first?: string; second?: string }
+    >();
+    for (const cls of result) {
+      const parsed = directionalPrefix(cls);
+      if (!parsed) continue;
+      if (parsed.prefix !== first && parsed.prefix !== second) continue;
+      const entry = byValue.get(parsed.value) ?? {};
+      if (parsed.prefix === first) entry.first = cls;
+      else entry.second = cls;
+      byValue.set(parsed.value, entry);
+    }
+    for (const [value, entry] of byValue) {
+      if (!entry.first || !entry.second) continue;
+      const shorthandClass = `${shorthand}-${value}`;
+      result = result.filter((c) => c !== entry.first && c !== entry.second);
+      if (!result.includes(shorthandClass)) {
+        result.push(shorthandClass);
+      }
+    }
+  };
+
+  combine('pt', 'pb', 'py');
+  combine('pl', 'pr', 'px');
+  combine('py', 'px', 'p');
+  combine('gap-x', 'gap-y', 'gap');
+
+  return result;
+}
+
+/**
  * Drop longhand direction utilities that a shorthand already covers, e.g.
  * `py-5` removes `pt-5`/`pb-5`, `px-2` removes `pl-2`/`pr-2`, and `gap-5`
  * removes `gap-x-5`/`gap-y-5`. Only redundant pairs with matching values are
  * removed, so an explicit `pt-6` alongside `p-4` survives (it overrides).
  */
 export function dedupeDirectionalClasses(classes: string[]): string[] {
+  const synthesized = synthesizeDirectionalClasses(classes);
   const shorthands = new Map<string, string>();
-  for (const cls of classes) {
+  for (const cls of synthesized) {
     const parsed = directionalPrefix(cls);
     if (parsed && SHORTHAND_COVERS[parsed.prefix]) {
       shorthands.set(parsed.prefix, parsed.value);
     }
   }
 
-  return classes.filter((cls) => {
+  return synthesized.filter((cls) => {
     const parsed = directionalPrefix(cls);
     if (!parsed) return true;
     // Drop the class if it is a longhand covered by a present shorthand with a
@@ -520,31 +587,103 @@ function quantizeElementNode(
   const mapped: TailwindClass[] = [];
   const leftover: Record<string, string> = {};
 
+  // Browsers compute pixel-based origin values (transform-origin,
+  // perspective-origin) on nearly every block, so only preserve them when a
+  // genuine, non-identity transform is present.
+  const hasNonIdentityTransform =
+    own.transform !== undefined && !isIdentityTransform(own.transform);
+
   for (const [prop, value] of Object.entries(own)) {
     const q = quantizeDeclaration(prop, value, context);
     if (q.confidence !== 'skipped' && q.className) {
       mapped.push(q.className);
     } else if (STYLE_WORTHY_PROPS.has(prop)) {
       leftover[prop] = value;
+    } else if (COMPUTED_ORIGIN_PROPS.has(prop) && hasNonIdentityTransform) {
+      leftover[prop] = value;
     }
   }
 
-  // For the root, promote a resolved dark background even when the style diff
-  // classified it as inherited (the element visually carries its own
-  // background, so a standalone decompiled component must bake it in). This
-  // fixes the black-card bug where `var(--ds-background-100)` collapsed to a
-  // transparent/white render in the preview.
-  if (
+  // ---- Effective background -------------------------------------------------
+  // Resolve the background the element actually renders so we can (a) promote
+  // an ancestor card background onto a transparent clicked root and (b)
+  // enforce text contrast on dark fills.
+  const computedBg = getComputedStyle(liveEl).getPropertyValue(
+    'background-color',
+  );
+  const parsedComputedBg = parseColor(computedBg);
+  const ownBg = own.backgroundColor;
+  let effectiveBg: string | null = null;
+
+  if (ownBg) {
+    effectiveBg = ownBg;
+  } else if (isRoot && parsedComputedBg && parsedComputedBg.alpha === 0) {
+    // The clicked root is transparent — inherit the parent's meaningful
+    // background so the preview doesn't default to a bare white canvas.
+    const parentEl = liveEl.parentElement;
+    if (parentEl) {
+      const parentBg = getComputedStyle(parentEl).getPropertyValue(
+        'background-color',
+      );
+      const parentParsed = parseColor(parentBg);
+      if (parentParsed && parentParsed.alpha > 0) {
+        effectiveBg = parentBg;
+        const q = quantizeDeclaration('backgroundColor', parentBg, context);
+        if (q.confidence !== 'skipped' && q.className) {
+          mapped.push(q.className);
+        }
+      }
+    }
+  } else if (
     isRoot &&
     extraction.base.inherited.backgroundColor !== undefined &&
     own.backgroundColor === undefined
   ) {
-    const value = getComputedStyle(liveEl).getPropertyValue('background-color');
-    const parsed = parseColor(value);
-    if (parsed && parsed.alpha > 0 && isDarkColor(parsed.rgb)) {
-      const q = quantizeDeclaration('backgroundColor', value, context);
+    // The element visually carries an inherited dark background (e.g. a
+    // `var(--ds-background-100)` that collapsed to transparent in the diff), so
+    // a standalone decompiled component must bake it in.
+    const inheritedParsed = parseColor(computedBg);
+    if (
+      inheritedParsed &&
+      inheritedParsed.alpha > 0 &&
+      isDarkColor(inheritedParsed.rgb)
+    ) {
+      effectiveBg = computedBg;
+      const q = quantizeDeclaration('backgroundColor', computedBg, context);
       if (q.confidence !== 'skipped' && q.className) {
         mapped.push(q.className);
+      }
+    }
+  }
+
+  // ---- Text contrast ---------------------------------------------------------
+  // Evaluate the computed text color on every element. When the element sits on
+  // a dark background, force a light token (e.g. text-zinc-50) so buttons never
+  // render black text on a black fill.
+  const effectiveParsed = effectiveBg ? parseColor(effectiveBg) : null;
+  if (
+    effectiveParsed &&
+    effectiveParsed.alpha > 0 &&
+    isDarkColor(effectiveParsed.rgb)
+  ) {
+    const computedColor = getComputedStyle(liveEl).getPropertyValue('color');
+    const colorParsed = parseColor(computedColor);
+    if (colorParsed) {
+      const isDarkText = isDarkColor(colorParsed.rgb);
+      const textQ = isDarkText
+        ? quantizeDeclaration('color', 'rgb(250, 250, 250)', context)
+        : quantizeDeclaration('color', computedColor, context);
+      if (textQ.confidence !== 'skipped' && textQ.className) {
+        if (isDarkText) {
+          // Drop any dark authored text token so the light one wins.
+          const nonText = mapped.filter(
+            (c) => !TEXT_COLOR_CLASS_RE.test(c),
+          );
+          mapped.length = 0;
+          mapped.push(...nonText, textQ.className);
+        } else {
+          mapped.push(textQ.className);
+        }
       }
     }
   }
